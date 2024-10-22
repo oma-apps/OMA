@@ -14,10 +14,14 @@ import (
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
+	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
 type OCIRevisionRepositoryConfig struct {
-	BaseURL string
+	BaseURL  string
+	Username string
+	Password string
 }
 
 func (c *OCIRevisionRepositoryConfig) Validate() error {
@@ -29,23 +33,39 @@ func (c *OCIRevisionRepositoryConfig) Validate() error {
 }
 
 type OCIRevisionRepository struct {
-	config *OCIRevisionRepositoryConfig
+	config   *OCIRevisionRepositoryConfig
+	registry *remote.Registry
 }
 
-func NewOCIRevisionRepository(config *OCIRevisionRepositoryConfig) *OCIRevisionRepository {
-	return &OCIRevisionRepository{
-		config: config,
-	}
-}
-
-func (r *OCIRevisionRepository) ListRevisions() ([]models.Revision, error) {
-	registry, err := remote.NewRegistry(r.config.BaseURL)
+func NewOCIRevisionRepository(config *OCIRevisionRepositoryConfig) (*OCIRevisionRepository, error) {
+	registry, err := remote.NewRegistry(config.BaseURL)
 	if err != nil {
 		return nil, err
 	}
 
+	registry.Client = &auth.Client{
+		Client: retry.DefaultClient,
+		Cache:  auth.NewCache(),
+		Credential: auth.StaticCredential(config.BaseURL, auth.Credential{
+			Username: config.Username,
+			Password: config.Password,
+		}),
+	}
+
+	err = registry.Ping(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return &OCIRevisionRepository{
+		config:   config,
+		registry: registry,
+	}, nil
+}
+
+func (r *OCIRevisionRepository) ListRevisions() ([]models.Revision, error) {
 	repositories := []string{}
-	registry.Repositories(context.Background(), "", func(repos []string) error {
+	r.registry.Repositories(context.Background(), "", func(repos []string) error {
 		repositories = append(repositories, repos...)
 		return nil
 	})
@@ -100,6 +120,7 @@ func (r *OCIRevisionRepository) ListRevisions() ([]models.Revision, error) {
 
 	return revisions, nil
 }
+
 func (r *OCIRevisionRepository) ListRevisionFiles(packageId string) ([]string, error) {
 	return []string{}, nil
 }
@@ -162,6 +183,8 @@ func (r *OCIRevisionRepository) DownloadRevisionForPackage(repository string, pa
 	if err != nil {
 		return nil, err
 	}
+
+	repo.Client = r.registry.Client
 
 	store := memory.New()
 	manifest, err := Manifest(repo, store, tag)
